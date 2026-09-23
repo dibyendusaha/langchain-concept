@@ -15,15 +15,28 @@ class Utils:
         self.__temperature = float(temperature)
 
 
-    def _load_file(self, path="./data/transcripts.xlsx") -> pd.DataFrame:
+    def _load_file(self, path=None) -> pd.DataFrame:
+        start_time = time.time()
+        
+        if path is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "transcripts.xlsx")
+
         if not os.path.exists(path):
             raise FileNotFoundError(f"File does not exists for the path -> {path}")
+
+        duration = (time.time() - start_time) * 1000
+        print(f"⌛ Time taken to load the file: {duration} ms")
 
         return pd.read_excel(path)
 
 
     def _save_file(self, df: pd.DataFrame, path="./data/output.xlsx") -> None:
+        start_time = time.time()
+
         df.to_excel(path, index=False)
+
+        duration = (time.time() - start_time) * 1000
+        print(f"⌛ Time taken to save the file: {duration} ms")
 
 
     def _load_llm(self) -> ChatOpenAI | ChatGoogleGenerativeAI:

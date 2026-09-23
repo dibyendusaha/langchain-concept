@@ -1,3 +1,4 @@
+import time
 import pandas as pd
 
 from tqdm import tqdm
@@ -6,7 +7,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableBranch
 from langchain_core.output_parsers import PydanticOutputParser
 
-from utils import Utils
+from .utils import Utils
 
 
 class ClassificationOutputModel(BaseModel):
@@ -26,11 +27,14 @@ class FinalReportOutputModel(BaseModel):
 
 class Components(Utils):
 
-    def __init__(self):
-        super().__init__(temperature=0.2)
+    def __init__(self, provider="openai"):
+        super().__init__(provider=provider, temperature=0.2)
+        print("🚀 Components has been initialised successfully")
 
 
-    def _classification(self, labels: list[str]) -> pd.DataFrame:
+    def _classification(self, df: pd.DataFrame, labels: list[str]) -> pd.DataFrame:
+        start_time = time.time()
+
         llm = self._load_llm()
         parser = PydanticOutputParser(pydantic_object=ClassificationOutputModel)
 
@@ -53,11 +57,9 @@ class Components(Utils):
             }
         )
 
-        df = self._load_file()
-
         results = []
 
-        for i, row in tqdm(iterable=df.iterrows(), total=len(df), desc="Running Classification"):
+        for i, row in tqdm(iterable=df.iterrows(), total=len(df), desc="Generating Classification"):
             try:
                 prompt_chain = prompt | llm | parser
 
@@ -72,7 +74,7 @@ class Components(Utils):
                 })
 
             except Exception as e:
-                print(f"Error at row[{i}] -> {e}")
+                print(f"⚠️ Error at row[{i}] -> {e}")
 
                 results.append({
                     "call_id": row["call_id"],
@@ -83,10 +85,14 @@ class Components(Utils):
         results_df = pd.DataFrame(data=results)
         df = df.merge(results_df, on="call_id")
 
+        duration = (time.time() - start_time) * 1000
+        print(f"⌛ Time taken to run the calssification job: {duration} ms")
+
+        print("🎉 Generated classification for the provided labels")
         return df
 
 
-    def _evaluation_plan(self, call_type: str) -> list[str]:
+    def __evaluation_plan(self, call_type: str) -> list[str]:
         call_type = call_type.lower()
         
         if call_type == "billing":
@@ -106,7 +112,9 @@ class Components(Utils):
 
 
     def _evaluation(self, df: pd.DataFrame) -> pd.DataFrame:
-        df["evaluation_plan"] = df["predicted_call_type"].apply(self._evaluation_plan)
+        start_time = time.time()
+
+        df["evaluation_plan"] = df["predicted_call_type"].apply(self.__evaluation_plan)
 
         llm = self._load_llm()
         parser = PydanticOutputParser(pydantic_object=EvaluationOutputModel)
@@ -186,20 +194,24 @@ class Components(Utils):
 
         results = []
 
-        for i, row in tqdm(iterable=df.iterrows(), total=len(df), desc="Running Evaluation"):
+        for i, row in tqdm(iterable=df.iterrows(), total=len(df), desc="Generating Evaluation"):
             eval_results = {}
 
             for eval_plan in row["evaluation_plan"]:
                 try:
-                    output = RunnableBranch(
+                    eval_response = RunnableBranch(
                         (lambda _: "tone_empathy" in eval_plan, tone_chain),
                         (lambda _: "knowledge_accuracy" in eval_plan, knowledge_chain),
                         (lambda _: "resolution_quality" in eval_plan, resolution_chain),
                         knowledge_chain
-                    )
-                    eval_results[eval_plan] = output.model_dump()
+                    ).invoke({
+                        "transcript": row["transcript"]
+                    })
+                    eval_results[eval_plan] = eval_response.model_dump()
 
                 except Exception as e:
+                    print(f"⚠️ Error at row[{i}] -> {e}")
+
                     eval_results[eval_plan] = {"error": str(e)}
 
             results.append({
@@ -210,16 +222,76 @@ class Components(Utils):
         results_df = pd.DataFrame(results)
         df = df.merge(results_df, on="call_id")
 
+        duration = (time.time() - start_time) * 1000
+        print(f"⌛ Time taken to run the evaluation plan: {duration} ms")
+
+        print("🎉 Generated evaluation plan for the provided transcripts")
         return df
 
 
     def _report_generation(self, df: pd.DataFrame) -> pd.DataFrame:
+        start_time = time.time()
+
         llm = self._load_llm()
         parser = PydanticOutputParser(pydantic_object=FinalReportOutputModel)
 
         final_report_prompt = PromptTemplate(
             template="""
+                You are a QA manager reviewing customer support calls.
+
+                Based on the evaluation results below, generate:
+
+                1. A concise summary of the agent's performance
+                2. A list of actionable recommendations for improvement
+
+                Evaluation Data:
+                {evaluation}
+
+                IMPORTANT:
+                - Be specific and practicals
+                - Do not repeat scores
+                - Focus on improvement
+
+                {format_instructions}
             """,
-            input_variables=[],
-            partial_variables={}
+            input_variables=["evaluation"],
+            partial_variables={
+                "format_instructions": parser.get_format_instructions()
+            }
         )
+        final_report_chain = final_report_prompt | llm | parser
+
+
+        results = []
+
+        for i, row in tqdm(iterable=df.iterrows(), total=len(df), desc="Generating Final report"):
+            try:
+                response = final_report_chain.invoke({
+                    "evaluation": row["evaluation"]
+                })
+
+                result = response.model_dump()
+
+                results.append({
+                    "call_id": row["call_id"],
+                    "summary": result.get("summary"),
+                    "recommendations": result.get("recommendations")
+                })
+
+            except Exception as e:
+                print(f"⚠️ Error at row[{i}] -> {e}")
+
+                results.append({
+                    "call_id": row["call_id"],
+                    "summary": None,
+                    "recommendations": None
+                })
+
+        results_df = pd.DataFrame(results)
+        df = df.merge(results_df, on="call_id")
+
+        duration = (time.time() - start_time) * 1000
+        print(f"⌛ Time taken to run the final reporting: {duration} ms")
+
+        print("🎉 Generated final report with recommendations and summary")
+        return df
